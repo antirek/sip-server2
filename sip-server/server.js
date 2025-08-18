@@ -358,25 +358,38 @@ function handleBye(message, rinfo) {
     const parsed = parseSipMessage(message);
     const callId = parsed.headers['Call-ID'];
     
+    console.log(`🎯 BYE ОБРАБОТКА: Получен BYE для звонка ${callId} от ${rinfo.address}:${rinfo.port}`);
+    
     const call = callManager.getCall(callId);
     if (call) {
+        console.log(`🎯 BYE ОБРАБОТКА: Найден активный звонок, пересылаем BYE к ${call.toNumber}`);
+        
         // Пересылаем BYE другому участнику
-        const byeMessage = `BYE ${call.toAddress}:${call.toPort} SIP/2.0\r\n` +
-            `Via: SIP/2.0/UDP ${rinfo.address}:${rinfo.port}\r\n` +
+        // ВАЖНО: используем To заголовок из 200 OK ответа (с tag), а не из BYE клиента
+        const toHeader = call.responseToHeader || parsed.headers['To'];
+        
+        const byeMessage = `BYE sip:${call.toNumber}@${call.toAddress}:${call.toPort} SIP/2.0\r\n` +
+            `Via: SIP/2.0/UDP ${config.sip.serverAddress}:${config.sip.port};branch=z9hG4bK-${Math.random().toString(36).substr(2, 9)}\r\n` +
             `From: ${parsed.headers['From']}\r\n` +
-            `To: ${parsed.headers['To']}\r\n` +
+            `To: ${toHeader}\r\n` +
             `Call-ID: ${callId}\r\n` +
             `CSeq: ${parsed.headers['CSeq']}\r\n` +
+            `Content-Length: 0\r\n` +
             '\r\n';
         
+        console.log(`🎯 BYE ОБРАБОТКА: Отправляем BYE к ${call.toNumber}:\n${byeMessage}`);
         sipServer.send(byeMessage, call.toPort, call.toAddress);
-        // Не удаляем звонок сразу, а помечаем как завершающийся
+        
+        // Помечаем звонок как завершающийся
         console.log(`🎯 BYE ОБРАБОТКА: Устанавливаем terminating = true для звонка ${callId}`);
-        call.terminating = true;
+        callManager.updateCallState(callId, 'TERMINATING', { terminating: true });
         rtpProxy.removeStream(callId);
         console.log(`🎯 BYE ОБРАБОТКА: Звонок ${callId} помечен как завершающийся`);
+    } else {
+        console.log(`🎯 BYE ОБРАБОТКА: Звонок ${callId} НЕ НАЙДЕН в активных звонках`);
     }
 
+    // Отправляем 200 OK на BYE
     const response = createSipResponse(200, 'OK', {
         'Via': parsed.headers['Via'],
         'From': parsed.headers['From'],
@@ -384,6 +397,7 @@ function handleBye(message, rinfo) {
         'Call-ID': callId,
         'CSeq': parsed.headers['CSeq']
     });
+    console.log(`🎯 BYE ОБРАБОТКА: Отправляем 200 OK на BYE к ${rinfo.address}:${rinfo.port}`);
     sipServer.send(response, rinfo.port, rinfo.address);
 }
 
@@ -556,8 +570,14 @@ sipServer.on('message', (message, rinfo) => {
         } else if (!call) {
             // Звонок не найден (возможно, уже удален)
             console.log(`🎯 200 OK ОБРАБОТКА: Звонок ${callId} не найден, игнорируем сообщение`);
-        } else if (call && (statusLine.includes('404') || statusLine.includes('486') || statusLine.includes('487'))) {
+        } else if (call && (statusLine.includes('404') || statusLine.includes('486') || statusLine.includes('487') || statusLine.includes('481'))) {
             console.log(`Пересылаем ${statusLine} к ${call.fromNumber}`);
+            
+            // Если это 481 ошибка на BYE, завершаем звонок
+            if (statusLine.includes('481') && cseqMethod === 'BYE') {
+                console.log(`🎯 481 ОБРАБОТКА: Завершаем звонок ${callId} из-за 481 ошибки на BYE`);
+                callManager.endCall(callId);
+            }
             
             // Пересылаем ошибку вызывающему абоненту
             const errorResponse = createSipResponse(
