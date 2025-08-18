@@ -407,21 +407,28 @@ function handleAck(message, rinfo) {
         }
         
         // Пересылаем ACK другому участнику
-        // Извлекаем branch из оригинального Via заголовка
-        const originalVia = parsed.headers['Via'];
+        // ВАЖНО: используем branch из оригинального INVITE, а не из ACK
+        const originalVia = call.originalVia || parsed.headers['Via'];
         const branchMatch = originalVia.match(/branch=([^;]+)/);
         const branch = branchMatch ? branchMatch[1] : 'z9hG4bK-' + Math.random().toString(36).substr(2, 9);
+        
+        // ВАЖНО: используем To заголовок из 200 OK ответа (с tag), а не из ACK клиента
+        const toHeader = call.responseToHeader || parsed.headers['To'];
         
         let ackMessage = `ACK sip:${call.toNumber}@${call.toAddress}:${call.toPort} SIP/2.0\r\n` +
             `Via: SIP/2.0/UDP ${config.sip.serverAddress}:${config.sip.port};branch=${branch}\r\n` +
             `From: ${parsed.headers['From']}\r\n` +
-            `To: ${parsed.headers['To']}\r\n` +
+            `To: ${toHeader}\r\n` +
             `Call-ID: ${callId}\r\n` +
             `CSeq: ${parsed.headers['CSeq']}\r\n`;
         
         if (parsed.headers['Contact']) {
             ackMessage += `Contact: ${parsed.headers['Contact']}\r\n`;
         }
+        
+        // ВАЖНО: добавляем Content-Length заголовок
+        const bodyLength = parsed.body ? parsed.body.length : 0;
+        ackMessage += `Content-Length: ${bodyLength}\r\n`;
         
         ackMessage += '\r\n';
         
@@ -476,13 +483,28 @@ sipServer.on('message', (message, rinfo) => {
         if (call && call.terminating) {
             console.log(`🎯 200 OK ОБРАБОТКА: ВНИМАНИЕ! Звонок уже помечен как завершающийся!`);
         }
+        
+        // Проверяем CSeq для определения типа ответа
+        const cseqHeader = parsed.headers['CSeq'];
+        const cseqMatch = cseqHeader ? cseqHeader.match(/(\d+) (\w+)/) : null;
+        const cseqNumber = cseqMatch ? parseInt(cseqMatch[1]) : 0;
+        const cseqMethod = cseqMatch ? cseqMatch[2] : '';
+        
+        console.log(`🎯 200 OK ОБРАБОТКА: CSeq: ${cseqNumber} ${cseqMethod}`);
+        
         if (call && statusLine.includes('200 OK') && call.terminating) {
             // Это ответ на BYE запрос
             console.log(`🎯 200 OK НА BYE: Получен 200 OK на BYE от ${call.toNumber}`);
             console.log(`🎯 200 OK НА BYE: Удаляем звонок ${callId} из активных звонков`);
             callManager.endCall(callId);
             console.log('🎯 200 OK НА BYE: Звонок полностью завершен');
-        } else if (call && statusLine.includes('200 OK')) {
+        } else if (call && statusLine.includes('200 OK') && cseqMethod === 'INVITE') {
+            // Проверяем, не ожидаем ли мы уже ACK (чтобы избежать повторных 200 OK)
+            if (call.waitingForAck) {
+                console.log(`🎯 200 OK ОБРАБОТКА: ИГНОРИРУЕМ повторный 200 OK от ${call.toNumber} - уже ожидаем ACK`);
+                return;
+            }
+            
             console.log(`Пересылаем 200 OK к ${call.fromNumber} на ${call.fromAddress}:${call.fromPort}`);
             
             // Настраиваем RTP поток если есть SDP в ответе
@@ -525,9 +547,15 @@ sipServer.on('message', (message, rinfo) => {
             console.log(`Отправляем 200 OK к ${call.fromNumber}:\n${okResponse}`);
             sipServer.send(okResponse, call.fromPort, call.fromAddress);
             
-            // Помечаем звонок как ожидающий ACK
-            callManager.updateCallState(callId, 'ESTABLISHED', { waitingForAck: true });
+            // Сохраняем To заголовок из 200 OK для использования в ACK
+            callManager.updateCallState(callId, 'ESTABLISHED', { 
+                waitingForAck: true,
+                responseToHeader: parsed.headers['To'] // Сохраняем To из 200 OK
+            });
             console.log(`Звонок ${callId} помечен как ожидающий ACK от ${call.fromNumber}`);
+        } else if (!call) {
+            // Звонок не найден (возможно, уже удален)
+            console.log(`🎯 200 OK ОБРАБОТКА: Звонок ${callId} не найден, игнорируем сообщение`);
         } else if (call && (statusLine.includes('404') || statusLine.includes('486') || statusLine.includes('487'))) {
             console.log(`Пересылаем ${statusLine} к ${call.fromNumber}`);
             
