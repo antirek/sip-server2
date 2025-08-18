@@ -264,7 +264,8 @@ function handleInvite(message, rinfo) {
             originalVia: parsed.headers['Via'],
             originalFrom: parsed.headers['From'],
             originalTo: parsed.headers['To'],
-            originalCSeq: parsed.headers['CSeq']
+            originalCSeq: parsed.headers['CSeq'],
+            originalContact: parsed.headers['Contact']
         });
 
         // Отправляем 100 Trying
@@ -357,7 +358,7 @@ function handleBye(message, rinfo) {
     const parsed = parseSipMessage(message);
     const callId = parsed.headers['Call-ID'];
     
-    const call = activeCalls.get(callId);
+    const call = callManager.getCall(callId);
     if (call) {
         // Пересылаем BYE другому участнику
         const byeMessage = `BYE ${call.toAddress}:${call.toPort} SIP/2.0\r\n` +
@@ -393,9 +394,8 @@ function handleAck(message, rinfo) {
     
     console.log(`🎯 ACK ОБРАБОТКА: Получен ACK для звонка ${callId} от ${rinfo.address}:${rinfo.port}`);
     console.log(`🎯 ACK ОБРАБОТКА: Call-ID: ${callId}`);
-    console.log(`🎯 ACK ОБРАБОТКА: Активные звонки: ${Array.from(activeCalls.keys()).join(', ')}`);
     
-    const call = activeCalls.get(callId);
+    const call = callManager.getCall(callId);
     if (call) {
         console.log(`🎯 ACK ОБРАБОТКА: Найден активный звонок`);
         console.log(`🎯 ACK ОБРАБОТКА: Пересылаем ACK к ${call.toNumber} на ${call.toAddress}:${call.toPort}`);
@@ -407,8 +407,13 @@ function handleAck(message, rinfo) {
         }
         
         // Пересылаем ACK другому участнику
+        // Извлекаем branch из оригинального Via заголовка
+        const originalVia = parsed.headers['Via'];
+        const branchMatch = originalVia.match(/branch=([^;]+)/);
+        const branch = branchMatch ? branchMatch[1] : 'z9hG4bK-' + Math.random().toString(36).substr(2, 9);
+        
         let ackMessage = `ACK sip:${call.toNumber}@${call.toAddress}:${call.toPort} SIP/2.0\r\n` +
-            `Via: SIP/2.0/UDP 192.168.0.42:5060\r\n` +
+            `Via: SIP/2.0/UDP ${config.sip.serverAddress}:${config.sip.port};branch=${branch}\r\n` +
             `From: ${parsed.headers['From']}\r\n` +
             `To: ${parsed.headers['To']}\r\n` +
             `Call-ID: ${callId}\r\n` +
@@ -429,7 +434,8 @@ function handleAck(message, rinfo) {
         console.log(`🎯 ACK ОБРАБОТКА: ACK переслан к ${call.toNumber} на ${call.toAddress}:${call.toPort}`);
     } else {
         console.log(`🎯 ACK ОБРАБОТКА: Звонок ${callId} НЕ НАЙДЕН в активных звонках`);
-        console.log(`🎯 ACK ОБРАБОТКА: Все активные звонки: ${Array.from(activeCalls.keys()).join(', ')}`);
+        const activeCalls = callManager.getActiveCalls();
+        console.log(`🎯 ACK ОБРАБОТКА: Все активные звонки: ${activeCalls.map(c => c.callId).join(', ')}`);
     }
 }
 
@@ -462,16 +468,21 @@ sipServer.on('message', (message, rinfo) => {
         
         console.log(`Получен ответ: ${statusLine} от ${rinfo.address}:${rinfo.port}`);
         console.log(`Call-ID ответа: ${callId}`);
-        console.log(`Активные звонки: ${Array.from(activeCalls.keys()).join(', ')}`);
         
-        const call = activeCalls.get(callId);
+        const call = callManager.getCall(callId);
         console.log(`🎯 200 OK ОБРАБОТКА: Call-ID: ${callId}`);
         console.log(`🎯 200 OK ОБРАБОТКА: Звонок найден: ${!!call}`);
         console.log(`🎯 200 OK ОБРАБОТКА: Звонок завершается: ${call ? call.terminating : 'N/A'}`);
         if (call && call.terminating) {
             console.log(`🎯 200 OK ОБРАБОТКА: ВНИМАНИЕ! Звонок уже помечен как завершающийся!`);
         }
-        if (call && statusLine.includes('200 OK')) {
+        if (call && statusLine.includes('200 OK') && call.terminating) {
+            // Это ответ на BYE запрос
+            console.log(`🎯 200 OK НА BYE: Получен 200 OK на BYE от ${call.toNumber}`);
+            console.log(`🎯 200 OK НА BYE: Удаляем звонок ${callId} из активных звонков`);
+            callManager.endCall(callId);
+            console.log('🎯 200 OK НА BYE: Звонок полностью завершен');
+        } else if (call && statusLine.includes('200 OK')) {
             console.log(`Пересылаем 200 OK к ${call.fromNumber} на ${call.fromAddress}:${call.fromPort}`);
             
             // Настраиваем RTP поток если есть SDP в ответе
@@ -513,12 +524,10 @@ sipServer.on('message', (message, rinfo) => {
             const okResponse = createSipResponse(200, 'OK', responseHeaders, responseBody);
             console.log(`Отправляем 200 OK к ${call.fromNumber}:\n${okResponse}`);
             sipServer.send(okResponse, call.fromPort, call.fromAddress);
-        } else if (call && statusLine.includes('200 OK') && call.terminating) {
-            // Это ответ на BYE запрос
-            console.log(`🎯 200 OK НА BYE: Получен 200 OK на BYE от ${call.toNumber}`);
-            console.log(`🎯 200 OK НА BYE: Удаляем звонок ${callId} из активных звонков`);
-            activeCalls.delete(callId);
-            console.log('🎯 200 OK НА BYE: Звонок полностью завершен');
+            
+            // Помечаем звонок как ожидающий ACK
+            callManager.updateCallState(callId, 'ESTABLISHED', { waitingForAck: true });
+            console.log(`Звонок ${callId} помечен как ожидающий ACK от ${call.fromNumber}`);
         } else if (call && (statusLine.includes('404') || statusLine.includes('486') || statusLine.includes('487'))) {
             console.log(`Пересылаем ${statusLine} к ${call.fromNumber}`);
             

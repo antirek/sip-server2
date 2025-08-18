@@ -1,0 +1,48 @@
+# Cursor rules for this project (SIP server)
+
+language: ru
+
+project:
+- Node.js SIP-сервер в каталоге `sip-server/`
+- Главный вход: `sip-server/server.js`
+- Вспомогательные модули: `sip-server/utils/sip-validator.js`, callManager, userManager, rtpProxy
+- Порты: SIP 5060/UDP, RTP 10000/UDP, API 3000/HTTP
+
+run:
+- ВСЕГДА запускать из каталога сервера
+  - cd /home/sergey/Projects/tmp/sip-client2/sip-server
+  - node server.js
+- Проверка API: curl http://localhost:3000/api/users
+- Переменные окружения: создать .env из env.example при необходимости
+
+editing:
+- Сохранять текущие отступы (не менять тип и ширину), не делать массовый авто-реформат
+- Делать минимальные точечные правки; не трогать несвязанный код
+- Имена переменных/функций делать говорящими; избегать однобуквенных имен
+- Ошибки обрабатывать явно; не подавлять исключения
+- Логи писать через существующие логгеры без избыточного шума
+
+sip-behavior:
+- REGISTER: поддерживать display-name и параметры в SIP URI
+- INVITE -> 200 OK -> ACK:
+  - Сервер пересылает сообщения, НЕ генерирует ACK за клиента
+  - В 200 OK сервер может модифицировать SDP (rtpProxy.modifySdp) и использовать оригинальные Via/From/To/CSeq/Call-ID из INVITE
+  - При пересылке ACK указывать корректный Via сервера с параметром branch (копировать из Via клиента при наличии или генерировать z9hG4bK-*)
+- 200 OK на BYE: если звонок помечен terminating, воспринимать 200 OK как ответ на BYE и завершать звонок через callManager.endCall(callId); не обрабатывать как INVITE
+- Состояния: после пересылки 200 OK устанавливать waitingForAck; при BYE ставить terminating=true, удалять RTP-потоки, по 200 OK на BYE финально завершать звонок
+- RTP: извлекать RTP-порты из SDP, настраивать rtpProxy.addStream/removeStream
+
+validation (utils/sip-validator.js):
+- Via: разрешать параметры (;rport, ;branch=...)
+- SIP URI: поддерживать параметры (например ;user=phone) и display-name ("name" <sip:...>)
+- Call-ID: поддерживать разные форматы у клиентов (включая без домена)
+
+checks-before-done:
+- Сервер стартует без ошибок (node server.js из каталога sip-server)
+- Регистрация абонентов 100–110 успешна
+- Звонок 100 -> 101: проходит INVITE -> 200 -> ACK, аудио есть, BYE завершает звонок, 200 OK на BYE обрабатывается, звонок удаляется
+- Нет повторяющегося 200 OK; ACK пересылается, Via содержит branch
+
+commit-style (рекомендация):
+- fix: кратко что исправлено и где
+- feat/chore/refactor/docs: по назначению

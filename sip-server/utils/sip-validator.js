@@ -5,14 +5,30 @@ class SipValidator {
         this.config = config;
     }
 
+    // Извлечение URI из заголовка (убирает отображаемое имя)
+    extractUri(header) {
+        if (!header || typeof header !== 'string') {
+            return null;
+        }
+        
+        // Ищем URI в угловых скобках <sip:...>
+        const bracketMatch = header.match(/<([^>]+)>/);
+        if (bracketMatch) {
+            return bracketMatch[1];
+        }
+        
+        // Если нет скобок, считаем что весь заголовок - это URI
+        return header.trim();
+    }
+
     // Валидация SIP URI
     validateSipUri(uri) {
         if (!uri || typeof uri !== 'string') {
             return { valid: false, error: 'URI is required and must be a string' };
         }
 
-        // Проверяем формат sip:number@domain
-        const sipUriPattern = /^sip:(\d+)@([^:]+)(?::(\d+))?$/;
+        // Проверяем формат sip:number@domain с возможными параметрами
+        const sipUriPattern = /^sip:(\d+)@([^:]+)(?::(\d+))?(?:;[^;]*)*$/;
         const match = uri.match(sipUriPattern);
         
         if (!match) {
@@ -57,7 +73,7 @@ class SipValidator {
 
         // Валидация Call-ID
         if (headers['Call-ID']) {
-            const callIdPattern = /^[a-zA-Z0-9._-]+@[a-zA-Z0-9._-]+$/;
+            const callIdPattern = /^[a-zA-Z0-9._-]+(?:@[a-zA-Z0-9._-]+)?(?:-[a-zA-Z0-9._-]+)?$/;
             if (!callIdPattern.test(headers['Call-ID'])) {
                 errors.push('Invalid Call-ID format');
             }
@@ -73,7 +89,7 @@ class SipValidator {
 
         // Валидация Via
         if (headers['Via']) {
-            const viaPattern = /^SIP\/2\.0\/UDP\s+[^:]+:\d+$/;
+            const viaPattern = /^SIP\/2\.0\/UDP\s+[^:]+:\d+(?:;[^;]*)*$/;
             if (!viaPattern.test(headers['Via'])) {
                 errors.push('Invalid Via header format');
             }
@@ -149,13 +165,21 @@ class SipValidator {
         }
 
         // Валидация To заголовка
-        const toValidation = this.validateSipUri(parsedMessage.headers['To']);
+        const toUri = this.extractUri(parsedMessage.headers['To']);
+        if (!toUri) {
+            return { valid: false, error: 'Invalid To header format' };
+        }
+        const toValidation = this.validateSipUri(toUri);
         if (!toValidation.valid) {
             return toValidation;
         }
 
         // Валидация From заголовка
-        const fromValidation = this.validateSipUri(parsedMessage.headers['From']);
+        const fromUri = this.extractUri(parsedMessage.headers['From']);
+        if (!fromUri) {
+            return { valid: false, error: 'Invalid From header format' };
+        }
+        const fromValidation = this.validateSipUri(fromUri);
         if (!fromValidation.valid) {
             return fromValidation;
         }
@@ -193,13 +217,21 @@ class SipValidator {
         }
 
         // Валидация To заголовка
-        const toValidation = this.validateSipUri(parsedMessage.headers['To']);
+        const toUri = this.extractUri(parsedMessage.headers['To']);
+        if (!toUri) {
+            return { valid: false, error: 'Invalid To header format' };
+        }
+        const toValidation = this.validateSipUri(toUri);
         if (!toValidation.valid) {
             return toValidation;
         }
 
         // Валидация From заголовка
-        const fromValidation = this.validateSipUri(parsedMessage.headers['From']);
+        const fromUri = this.extractUri(parsedMessage.headers['From']);
+        if (!fromUri) {
+            return { valid: false, error: 'Invalid From header format' };
+        }
+        const fromValidation = this.validateSipUri(fromUri);
         if (!fromValidation.valid) {
             return fromValidation;
         }
